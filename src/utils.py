@@ -115,3 +115,56 @@ def build_rag_db(model, val_dl):
     np.save('saved_models/rag_texts.npy', np.array(db_texts))
     np.save('saved_models/rag_filenames.npy', np.array(db_filenames))
     print(f"✅ Database Built: {final_vectors.shape[0]} entries.")
+import os
+import faiss
+from transformers import pipeline
+
+def generate_report_with_flan(query_text, query_img_tensor, vit_model):
+    print("\n🧠 INITIALIZING FLAN-T5 RAG GENERATOR...")
+    
+    # 1. Load the database created by build_rag_db
+    try:
+        db_vectors = np.load('saved_models/rag_vectors.npy')
+        db_texts = np.load('saved_models/rag_texts.npy')
+    except FileNotFoundError:
+        print("Error: RAG Database not found. Run build_rag_db first.")
+        return
+
+    # 2. Extract embedding for the incoming query image
+    vit_model.eval()
+    with torch.no_grad():
+        q_emb = vit_model.forward_features(query_img_tensor)[:, 0, :].cpu().numpy()
+
+    # 3. Build FAISS Index and retrieve Top-3 cases
+    faiss.normalize_L2(db_vectors)
+    faiss.normalize_L2(q_emb)
+    
+    index = faiss.IndexFlatIP(db_vectors.shape[1])
+    index.add(db_vectors)
+    sims, idxs = index.search(q_emb, k=3)
+
+    # 4. Construct Context from retrieved reports
+    context = ""
+    for r, i in enumerate(idxs[0]):
+        context += f"\nCase {r+1} Findings: {db_texts[i]}"
+
+    # 5. Build Zero-Shot Prompt
+    prompt = f"""You are an expert chest radiologist.
+
+User Query:
+{query_text}
+
+Retrieved Similar Historical Cases:
+{context}
+
+Generate a formal diagnostic chest X-ray report."""
+
+    # 6. Generate Report using FLAN-T5
+    llm = pipeline("text2text-generation", model="google/flan-t5-base", max_new_tokens=256, device=0 if torch.cuda.is_available() else -1)
+    result = llm(prompt)
+    
+    print("\n" + "="*50)
+    print("FINAL DIAGNOSTIC REPORT (FLAN-T5)")
+    print("="*50)
+    print(result[0]['generated_text'])
+    print("="*50)
